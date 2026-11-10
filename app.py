@@ -1613,6 +1613,196 @@ def admin_seed():
     log("가상 참가자 생성", "%d명" % n)
     return go("/admin/tools", "가상 참가자 %d명을 만들었어요." % n)
 
+# ------------------------------------------------------------
+# [4차 추가] 은밀한 개발자 입구 + 쪽지함 + 빼빼로 답장
+# ------------------------------------------------------------
+
+# (1) 주소를 짧게 쳐도 개발자 페이지로 가게 한다  (/dev, /d)
+@app.route("/dev")
+@app.route("/d")
+def dev_entry():
+    return redirect("/admin")
+
+
+# (2) 모든 화면에 '숨은 버튼'과 '쪽지함 버튼'을 끼워 넣는다
+#  - 숨은 버튼: 화면 맨 아래 가운데를 1.5초 안에 5번 톡톡톡톡톡 누르면 개발자 페이지로 이동
+#  - 쪽지함 버튼: 로그인한 사용자 화면 왼쪽 아래에 표시, 아직 답장 안 한 쪽지 수가 빨간 숫자로 나온다
+SECRET_HTML = (
+    '<div id="pp-sec" style="position:fixed;left:50%;bottom:0;width:70px;height:36px;'
+    'margin-left:-35px;z-index:9998;-webkit-tap-highlight-color:transparent;"></div>'
+    '<script>(function(){var e=document.getElementById("pp-sec"),c=0,t=0;'
+    'e.addEventListener("click",function(){var n=Date.now();if(n-t>1500){c=0;}t=n;c++;'
+    'if(c>=5){location.href="/admin";}});})();</script>'
+)
+
+
+def inbox_pill(n):
+    badge = ('<span style="background:#d7263d;color:#fff;border-radius:10px;padding:1px 7px;'
+             'margin-left:6px;font-size:13px;">%d</span>' % n) if n else ""
+    return ('<a href="/inbox" style="position:fixed;left:14px;bottom:14px;z-index:9997;'
+            'background:#4a2c1a;color:#fff6e5;padding:12px 18px;border-radius:26px;'
+            'text-decoration:none;font-size:15px;box-shadow:0 3px 10px rgba(0,0,0,.3);">'
+            '쪽지함%s</a>' % badge)
+
+
+@app.after_request
+def inject_extras(resp):
+    try:
+        if resp.status_code != 200 or resp.mimetype != "text/html":
+            return resp
+        if request.path.startswith("/admin") or request.path.startswith("/static"):
+            return resp
+        html = resp.get_data(as_text=True)
+        pos = html.rfind("</body>")
+        if pos < 0:
+            return resp
+        extra = SECRET_HTML
+        uid = session.get("uid")
+        if uid and request.path != "/inbox":
+            n = get_db().execute(
+                "SELECT COUNT(*) FROM gifts g JOIN participants p ON p.id=g.from_id "
+                "WHERE g.to_id=? AND p.banned=0 AND NOT EXISTS "
+                "(SELECT 1 FROM gifts r WHERE r.from_id=? AND r.to_id=g.from_id)", (uid, uid)).fetchone()[0]
+            extra += inbox_pill(n)
+        resp.set_data(html[:pos] + extra + html[pos:])
+    except Exception:
+        pass     # 끼워 넣기에 실패해도 원래 화면은 그대로 보여준다
+    return resp
+
+
+# (3) 쪽지함 화면
+INBOX = """
+<div class="card">
+  <h2>쪽지함</h2>
+  <p class="small">나에게 빼빼로를 건넨 사람들이에요. 내 TOP3 밖의 사람이 보냈어도 여기서 확인하고 답장할 수 있어요.</p>
+  <a class="btn sub" href="/result">내 결과 보기</a>
+  <a class="btn sub" href="/inbox">새로고침</a>
+</div>
+
+<div class="card">
+  <h3>받은 빼빼로 ({{ received|length }})</h3>
+  {% if not received %}<p class="small">아직 받은 빼빼로가 없어요. 조금만 기다려 보세요!</p>{% endif %}
+  {% for r in received %}
+  <div style="border-top:1px solid #eadfcf;padding:14px 0;">
+    <b>{{ r.nickname }}</b> ({{ r.age }}세{% if r.mbti %} · {{ r.mbti }}{% endif %})
+    {% if r.idx is not none %}
+      <div class="score" style="font-size:26px">{{ r.idx }}점</div>
+      <div class="small">{{ r.rank_text }} · 내 기준 {{ r.s1 }}점 / 상대 기준 {{ r.s2 }}점</div>
+    {% endif %}
+    <div style="background:#f6f1e8;border-radius:12px;padding:10px 14px;margin:10px 0;">
+      “{{ r.msg }}”<div class="small">{{ r.at }}</div>
+    </div>
+    {% if r.replied %}
+      <div class="msg" style="background:#e5f6e8;border-left-color:#2e9e4f">
+        서로 건넸어요!
+        {% if r.insta %}인스타그램:
+          <a href="{{ r.insta_url }}" target="_blank" rel="noopener">@{{ r.insta }}</a>{% endif %}
+      </div>
+    {% else %}
+      <form method="post" action="/reply/{{ r.id }}"
+            onsubmit="return confirm('{{ r.nickname }}님에게 빼빼로 답장을 보낼까요?');">
+        <label>답장 쪽지 (고치지 않으면 기본 문구가 가요)</label>
+        <input type="text" name="message" maxlength="60" value="{{ default_msg }}">
+        <button type="submit">빼빼로 답장 보내기</button>
+      </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <h3>내가 보낸 빼빼로 ({{ sent|length }})</h3>
+  {% if not sent %}<p class="small">아직 보낸 빼빼로가 없어요. 결과 화면에서 건네 보세요!</p>{% endif %}
+  {% for s in sent %}
+  <div style="border-top:1px solid #eadfcf;padding:12px 0;">
+    <b>{{ s.nickname }}</b> ({{ s.age }}세) · <span class="small">{{ s.at }}</span>
+    <div>내 쪽지: “{{ s.msg }}”</div>
+    {% if s.reply_msg is not none %}
+      <div class="msg" style="background:#e5f6e8;border-left-color:#2e9e4f">
+        답장이 왔어요: “{{ s.reply_msg }}”
+        {% if s.insta %}<br>인스타그램: <a href="{{ s.insta_url }}" target="_blank" rel="noopener">@{{ s.insta }}</a>{% endif %}
+      </div>
+    {% else %}
+      <div class="small">아직 답장을 기다리고 있어요.</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+"""
+
+
+def insta_link(insta):
+    return "https://www.instagram.com/" + quote(insta) if insta else ""
+
+
+@app.route("/inbox")
+def inbox():
+    me = current_user()
+    if not me:
+        return go("/", "먼저 가입하거나 로그인해 주세요.")
+    db = get_db()
+
+    # 내 기준 전체 순위표 (점수 + 순위를 쪽지에 붙이려고)
+    ranks = {}
+    if me["ans"]:
+        allr, _ = get_top(me, 9999)
+        for i, t in enumerate(allr):
+            ranks[t["p"]["id"]] = (i + 1, t)
+
+    rows = db.execute(
+        "SELECT p.*, g.message AS gmsg, g.created_at AS gat, "
+        "EXISTS(SELECT 1 FROM gifts r WHERE r.from_id=? AND r.to_id=g.from_id) AS replied "
+        "FROM gifts g JOIN participants p ON p.id=g.from_id "
+        "WHERE g.to_id=? AND p.banned=0 ORDER BY replied ASC, g.id DESC", (me["id"], me["id"])).fetchall()
+    received = []
+    for r in rows:
+        p = row_to_person(r)
+        item = {"id": p["id"], "nickname": p["nickname"], "age": p["age"],
+                "mbti": p["ans"]["mbti"] if p["ans"] else "",
+                "msg": r["gmsg"] or DEFAULT_MSG, "at": (r["gat"] or "")[:16],
+                "replied": bool(r["replied"]), "insta": p["insta"], "insta_url": insta_link(p["insta"]),
+                "idx": None, "s1": None, "s2": None, "rank_text": ""}
+        if me["ans"] and p["ans"]:
+            idx, _, s1, s2 = pair_index(me, p)
+            rk = ranks.get(p["id"], (0, None))[0]
+            item.update(idx=idx, s1=s1, s2=s2,
+                        rank_text=("내 TOP3 중 %d위" % rk) if 0 < rk <= 3 else ("내 순위 %d위 (TOP3 밖)" % rk))
+        received.append(item)
+
+    srows = db.execute(
+        "SELECT p.nickname, p.age, p.insta, g.message, g.created_at, "
+        "(SELECT r.message FROM gifts r WHERE r.from_id=g.to_id AND r.to_id=g.from_id) AS reply_msg "
+        "FROM gifts g JOIN participants p ON p.id=g.to_id "
+        "WHERE g.from_id=? AND p.banned=0 ORDER BY g.id DESC", (me["id"],)).fetchall()
+    sent = [{"nickname": s["nickname"], "age": s["age"], "msg": s["message"] or DEFAULT_MSG,
+             "at": (s["created_at"] or "")[:16], "reply_msg": s["reply_msg"],
+             "insta": s["insta"] if s["reply_msg"] is not None else "",
+             "insta_url": insta_link(s["insta"])} for s in srows]
+
+    return page(INBOX, user=me, received=received, sent=sent, default_msg=DEFAULT_MSG,
+                flash=request.args.get("m"))
+
+
+@app.route("/reply/<int:from_id>", methods=["POST"])
+def reply(from_id):
+    me = current_user()
+    if not me:
+        return go("/", "먼저 가입하거나 로그인해 주세요.")
+    db = get_db()
+    got = db.execute("SELECT 1 FROM gifts g JOIN participants p ON p.id=g.from_id "
+                     "WHERE g.from_id=? AND g.to_id=? AND p.banned=0", (from_id, me["id"])).fetchone()
+    if not got:
+        return go("/inbox", "그 사람이 보낸 빼빼로가 없어요.")
+    msg = (request.form.get("message") or "").strip()[:60] or DEFAULT_MSG
+    try:
+        db.execute("INSERT INTO gifts (from_id, to_id, message, created_at) VALUES (?,?,?,?)",
+                   (me["id"], from_id, msg, now_kst()))
+        db.commit()
+    except sqlite3.IntegrityError:
+        return go("/inbox", "이미 답장을 보냈어요.")
+    return go("/inbox", "답장을 보냈어요! 서로 건넸으니 인스타그램 아이디가 공개돼요.")
+
+
 
 if __name__ == "__main__":
     app.run(debug=True)
