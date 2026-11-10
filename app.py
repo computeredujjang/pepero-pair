@@ -1636,6 +1636,18 @@ SECRET_HTML = (
 )
 
 
+# 핸드폰 화면에서 위쪽 로고가 2줄로 깨지지 않게 글자를 줄이는 스타일 (화면 폭 520px 이하일 때만 적용)
+MOBILE_FIX = (
+    '<style>@media (max-width:520px){'
+    'header{padding:10px 12px !important;gap:8px !important;flex-wrap:nowrap !important;}'
+    '.logo,header .logo,header .logo *{font-size:clamp(13px,4.3vw,17px) !important;'
+    'white-space:nowrap !important;letter-spacing:0 !important;}'
+    'header a,header span{font-size:13px !important;white-space:nowrap !important;}'
+    'header svg{width:20px !important;height:20px !important;}'
+    '}</style>'
+)
+
+
 def inbox_pill(n):
     badge = ('<span style="background:#d7263d;color:#fff;border-radius:10px;padding:1px 7px;'
              'margin-left:6px;font-size:13px;">%d</span>' % n) if n else ""
@@ -1656,7 +1668,7 @@ def inject_extras(resp):
         pos = html.rfind("</body>")
         if pos < 0:
             return resp
-        extra = SECRET_HTML
+        extra = MOBILE_FIX + SECRET_HTML
         uid = session.get("uid")
         if uid and request.path != "/inbox":
             n = get_db().execute(
